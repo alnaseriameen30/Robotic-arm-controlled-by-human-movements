@@ -1,0 +1,117 @@
+import cv2
+import mediapipe as mp
+import serial
+import time
+import math
+import numpy as np
+
+# --- CONFIGURATION ---
+SERIAL_PORT = 'COM5' 
+BAUD_RATE = 9600
+
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2)
+    print("Arduino Connected!")
+except:
+    print("Arduino not found. Running in Simulation Mode.")
+    ser = None
+
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+mp_draw = mp.solutions.drawing_utils
+cap = cv2.VideoCapture(0)
+
+# Helper: Calculate angle
+def calculate_angle(a, b, c):
+    a = np.array(a)
+    b = np.array(b)
+    c = np.array(c)
+    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
+    angle = np.abs(radians*180.0/np.pi)
+    if angle > 180.0: angle = 360-angle
+    return int(angle)
+
+# Smoothing variables
+prev_base = 90
+prev_arm = 90
+
+print("--- DUAL MOTOR MODE ---")
+print("1. BASE (Pin 9): Twist Hips")
+print("2. DUAL ARM (Pin 10 & 11): Flex Right Elbow")
+print("3. GRIPPER (Pin 8): Left Hand Trigger")
+
+while True:
+    success, img = cap.read()
+    if not success: break
+
+    img = cv2.flip(img, 1)
+    h, w, c = img.shape
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    results = pose.process(img_rgb)
+
+    if results.pose_landmarks:
+        landmarks = results.pose_landmarks.landmark
+        mp_draw.draw_landmarks(img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+        
+        # --- 1. BASE: HIP TWIST (Pin 9) ---
+        l_hip_z = landmarks[23].z
+        r_hip_z = landmarks[24].z
+        twist = l_hip_z - r_hip_z
+        
+        target_base = np.interp(twist, [-0.15, 0.15], [180, 0])
+        s1 = int(0.6 * target_base + 0.4 * prev_base) # Smooth it
+        prev_base = s1
+
+        # --- 2. DUAL ARM: ELBOW FLEX (Pins 10 & 11) ---
+        # Get coordinates
+        shoulder = [landmarks[12].x * w, landmarks[12].y * h]
+        elbow    = [landmarks[14].x * w, landmarks[14].y * h]
+        wrist    = [landmarks[16].x * w, landmarks[16].y * h]
+        
+        human_elbow_angle = calculate_angle(shoulder, elbow, wrist)
+        
+        # Map Human Arm (30=Bent, 160=Straight) -> Master Servo Angle
+        # Tweak [45, 180] if you want more/less range
+        target_arm = np.interp(human_elbow_angle, [30, 160], [45, 180])
+        
+        # Smooth the arm movement
+        master_angle = int(0.6 * target_arm + 0.4 * prev_arm)
+        prev_arm = master_angle
+        
+        # --- THE MIRROR LOGIC ---
+        s2 = master_angle        # Pin 10 (Normal)
+        s3 = 180 - master_angle  # Pin 11 (Reverse/Mirror)
+
+        # --- 3. GRIPPER: LEFT HAND (Pin 8) ---
+        l_wrist_y = landmarks[15].y
+        l_shoulder_y = landmarks[11].y
+        
+        if l_wrist_y < l_shoulder_y:
+            s5 = 180 # Close
+            cv2.putText(img, "GRIP: CLOSE", (50, 150), cv2.FONT_HERSHEY_PLAIN, 3, (0, 0, 255), 3)
+        else:
+            s5 = 0   # Open
+
+        # Pin 12 Fixed
+        s4 = 90
+
+        # --- SEND TO ARDUINO ---
+        if ser:
+            # Format: Base, Master, Slave, Fixed, Gripper
+            msg = f"{s1},{s2},{s3},{s4},{s5}\n"
+            ser.write(msg.encode('utf-8'))
+            
+            # Debug Print: Watch s2 and s3 to prove they are opposites!
+            print(f"Base:{s1}  Arm_Master:{s2}  Arm_Slave:{s3}")
+
+        # Visuals
+        cv2.putText(img, f"Base: {s1}", (50, 50), cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 2)
+        cv2.putText(img, f"Arm: {s2}/{s3}", (50, 80), cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 2)
+
+    cv2.imshow("Dual Motor Mode", img)
+    if cv2.waitKey(1) & 0xFF == ord('q'): break
+
+cap.release()
+cv2.destroyAllWindows()
+if ser: ser.close()
