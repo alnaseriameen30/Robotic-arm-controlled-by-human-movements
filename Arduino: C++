@@ -1,1 +1,43 @@
+#include <Servo.h>
 
+Servo base;         // Pin 9 Base
+Servo sh_primary;   // Pin 10 Arm 1 (Primary)
+Servo sh_secondary; // Pin 11 Arm 1 (Secondary)
+Servo elbow;        // Pin 12 Arm 2
+Servo gripper;      // Pin 8 Gripper
+
+void setup() {
+  Serial.begin(9600);
+  Serial.setTimeout(20);
+  
+  base.attach(9);
+  sh_primary.attach(10);
+  sh_secondary.attach(11);
+  elbow.attach(12);
+  gripper.attach(8);
+
+  // Safe Start
+  base.write(90);
+  sh_primary.write(90); 
+  sh_secondary.write(90);
+  elbow.write(90);
+  gripper.write(0);
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    int v1 = Serial.parseInt(); // Base
+    int v2 = Serial.parseInt(); // Arm 1 Primary
+    int v3 = Serial.parseInt(); // Arm 1 Secondary
+    int v4 = Serial.parseInt(); // Arm 2
+    int v5 = Serial.parseInt(); // Gripper
+
+    if (Serial.read() == '\n') {
+      base.write(v1);
+      sh_primary.write(v2);
+      sh_secondary.write(v3);
+      elbow.write(v4);
+      gripper.write(v5);
+    }
+  }
+}
